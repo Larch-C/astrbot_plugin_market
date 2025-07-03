@@ -267,7 +267,7 @@ class PluginMarket(Star):
             release_url = f"https://api.github.com/repos/{author}/{repo}/releases"
 
             try:
-                # 使用异步httpx请求获取版本信息
+                # 请求获取版本信息
                 response = await self.httpx_async_client.get(release_url)
                 response.raise_for_status()
                 releases = response.json()
@@ -282,7 +282,7 @@ class PluginMarket(Star):
             if proxy:
                 download_url = f"{proxy}/{download_url}"
 
-            # 下载插件zip包 - 异步请求
+            # 下载插件zip包
             response = await self.httpx_async_client.get(download_url)
             if response.status_code == 404 and "master.zip" in download_url:
                 alt_url = download_url.replace("master.zip", "main.zip")
