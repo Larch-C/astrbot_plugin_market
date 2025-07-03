@@ -16,15 +16,7 @@ from astrbot.api.star import Context, Star, register
 
 # 插件API地址
 PLUGIN_API_URL = "https://api.soulter.top/astrbot/plugins"
-
-
-@register(
-    "astrbot_plugin_market",
-    "长安某。",
-    "AstrBot插件市场",
-    "1.0.0",
-    "https://github.com/zgojin/astrbot_plugin_market",
-)
+@register("astrbot_plugin_market", "长安某", "插件市场", "4.7.2","https://github.com/zgojin/astrbot_plugin_market")
 class PluginMarket(Star):
     def __init__(self, context: Context):
         super().__init__(context)
