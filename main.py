@@ -27,13 +27,19 @@ class PluginMarket(Star):
         self.proxy = context._config.get("proxy", None)
         self.loop = asyncio.get_event_loop()
         self.plugin_manager = context._star_manager
+        # 新增异步httpx客户端
+        self.httpx_async_client = None
 
     async def on_load(self):
+        # 初始化异步httpx客户端
+        self.httpx_async_client = httpx.AsyncClient(proxy=self.proxy)
         await self.fetch_plugin_data()
 
     async def on_unload(self):
         if self.session:
             await self.session.close()
+        if self.httpx_async_client:
+            await self.httpx_async_client.aclose()
 
     async def fetch_plugin_data(self):
         try:
@@ -204,16 +210,13 @@ class PluginMarket(Star):
             self.plugins_dir.mkdir(parents=True, exist_ok=True)
             yield event.plain_result(f" 开始安装插件: {plugin_name}")
 
-            # 执行插件下载和安装
-            await self.loop.run_in_executor(
-                None,
-                lambda: self.manage_plugin(
-                    plugin_key,
-                    plugin_info,
-                    self.plugins_dir,
-                    is_update=False,
-                    proxy=self.proxy,
-                ),
+            # 执行插件下载和安装 - 改为直接异步调用
+            await self.manage_plugin(
+                plugin_key,
+                plugin_info,
+                self.plugins_dir,
+                is_update=False,
+                proxy=self.proxy,
             )
 
             # 安装成功后自动加载新插件
@@ -224,7 +227,7 @@ class PluginMarket(Star):
             logger.error(f"安装插件 {plugin_name} 失败: {e}", exc_info=True)
             yield event.plain_result(f" 安装失败: {str(e)}")
 
-    def manage_plugin(
+    async def manage_plugin(
         self,
         plugin_key: str,
         plugin: dict,
@@ -247,7 +250,7 @@ class PluginMarket(Star):
 
         try:
             print(f"正在从 {repo_url} 下载插件 {plugin_name}...")
-            self.get_git_repo(repo_url, target_path, proxy)
+            await self.get_git_repo(repo_url, target_path, proxy)
             print(f"插件 {plugin_name} 安装成功")
         except Exception as e:
             if target_path.exists():
@@ -256,7 +259,7 @@ class PluginMarket(Star):
                 shutil.move(backup_path, target_path)
             raise click.ClickException(f"安装插件 {plugin_name} 时出错: {e}")
 
-    def get_git_repo(self, url: str, target_path: Path, proxy: Optional[str] = None):
+    async def get_git_repo(self, url: str, target_path: Path, proxy: Optional[str] = None):
         temp_dir = Path(tempfile.mkdtemp())
         try:
             repo_namespace = url.split("/")[-2:]
@@ -264,31 +267,31 @@ class PluginMarket(Star):
             release_url = f"https://api.github.com/repos/{author}/{repo}/releases"
 
             try:
-                with httpx.Client(proxy=proxy, follow_redirects=True) as client:
-                    resp = client.get(release_url)
-                    resp.raise_for_status()
-                    releases = resp.json()
-                    download_url = (
-                        releases[0]["zipball_url"]
-                        if releases
-                        else f"https://github.com/{author}/{repo}/archive/refs/heads/master.zip"
-                    )
+                # 使用异步httpx请求获取版本信息
+                response = await self.httpx_async_client.get(release_url)
+                response.raise_for_status()
+                releases = response.json()
+                download_url = (
+                    releases[0]["zipball_url"]
+                    if releases
+                    else f"https://github.com/{author}/{repo}/archive/refs/heads/master.zip"
+                )
             except Exception:
                 download_url = url
 
             if proxy:
                 download_url = f"{proxy}/{download_url}"
 
-            with httpx.Client(proxy=proxy, follow_redirects=True) as client:
-                resp = client.get(download_url)
-                if resp.status_code == 404 and "master.zip" in download_url:
-                    alt_url = download_url.replace("master.zip", "main.zip")
-                    print("尝试下载main分支")
-                    resp = client.get(alt_url)
-                    resp.raise_for_status()
-                else:
-                    resp.raise_for_status()
-                zip_content = BytesIO(resp.content)
+            # 下载插件zip包 - 异步请求
+            response = await self.httpx_async_client.get(download_url)
+            if response.status_code == 404 and "master.zip" in download_url:
+                alt_url = download_url.replace("master.zip", "main.zip")
+                print("尝试下载main分支")
+                response = await self.httpx_async_client.get(alt_url)
+                response.raise_for_status()
+            else:
+                response.raise_for_status()
+            zip_content = BytesIO(response.content)
 
             with ZipFile(zip_content) as z:
                 z.extractall(temp_dir)
