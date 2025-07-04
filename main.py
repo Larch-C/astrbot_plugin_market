@@ -16,7 +16,15 @@ from astrbot.api.star import Context, Star, register
 
 # 插件API地址
 PLUGIN_API_URL = "https://api.soulter.top/astrbot/plugins"
-@register("astrbot_plugin_market", "长安某", "插件市场", "4.7.2","https://github.com/zgojin/astrbot_plugin_market")
+
+
+@register(
+    "astrbot_plugin_market",
+    "长安某",
+    "插件市场",
+    "1.0.0",
+    "https://github.com/zgojin/astrbot_plugin_market",
+)
 class PluginMarket(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -235,6 +243,9 @@ class PluginMarket(Star):
         is_update: bool = False,
         proxy: Optional[str] = None,
     ) -> None:
+        if self.httpx_async_client is None:
+            self.httpx_async_client = httpx.AsyncClient(proxy=self.proxy)
+
         plugin_name = plugin_key
         repo_url = plugin["repo"]
         target_path = plugins_dir / plugin_name
@@ -259,7 +270,9 @@ class PluginMarket(Star):
                 shutil.move(backup_path, target_path)
             raise click.ClickException(f"安装插件 {plugin_name} 时出错: {e}")
 
-    async def get_git_repo(self, url: str, target_path: Path, proxy: Optional[str] = None):
+    async def get_git_repo(
+        self, url: str, target_path: Path, proxy: Optional[str] = None
+    ):
         temp_dir = Path(tempfile.mkdtemp())
         try:
             repo_namespace = url.split("/")[-2:]
@@ -267,8 +280,10 @@ class PluginMarket(Star):
             release_url = f"https://api.github.com/repos/{author}/{repo}/releases"
 
             try:
-                # 请求获取版本信息
-                response = await self.httpx_async_client.get(release_url)
+                # 使用异步httpx请求获取版本信息
+                response = await self.httpx_async_client.get(
+                    release_url, follow_redirects=True
+                )
                 response.raise_for_status()
                 releases = response.json()
                 download_url = (
@@ -282,12 +297,16 @@ class PluginMarket(Star):
             if proxy:
                 download_url = f"{proxy}/{download_url}"
 
-            # 下载插件zip包
-            response = await self.httpx_async_client.get(download_url)
+            # 下载插件zip包 - 异步请求
+            response = await self.httpx_async_client.get(
+                download_url, follow_redirects=True
+            )
             if response.status_code == 404 and "master.zip" in download_url:
                 alt_url = download_url.replace("master.zip", "main.zip")
                 print("尝试下载main分支")
-                response = await self.httpx_async_client.get(alt_url)
+                response = await self.httpx_async_client.get(
+                    alt_url, follow_redirects=True
+                )
                 response.raise_for_status()
             else:
                 response.raise_for_status()
