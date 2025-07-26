@@ -24,7 +24,7 @@ GITHUB_REPO_REGEX = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.0.0",
+    "1.1.0",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
