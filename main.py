@@ -16,8 +16,11 @@ from astrbot.api.star import Context, Star, register
 # 导入 HtmlRenderer
 from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
-# 插件API地址
-PLUGIN_API_URL = "https://api.soulter.top/astrbot/plugins"
+# 插件API地址（主地址和备用地址）
+PLUGIN_API_URLS = [
+    "https://api.soulter.top/astrbot/plugins",  
+    "https://plugin.astrbot.uk"                 
+]
 
 # GitHub仓库URL正则表达式
 GITHUB_REPO_REGEX = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$")
@@ -27,7 +30,7 @@ GITHUB_REPO_REGEX = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.2.0",
+    "1.2.1",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
@@ -43,7 +46,7 @@ class PluginMarket(Star):
         
         # 渲染配置
         self.render_endpoint = "https://t2i.soulter.top/text2img"  
-        self.fallback_render_endpoint = "https://t2i.astrbot.uk" 
+        self.fallback_render_endpoint = "https://t2i.astrbot.uk"
         self.renderer = HtmlRenderer(self.render_endpoint)
         
         # 初始化Jinja2模板环境
@@ -62,24 +65,36 @@ class PluginMarket(Star):
             await self.httpx_async_client.aclose()
 
     async def fetch_plugin_data(self):
-        try:
-            async with self.session.get(PLUGIN_API_URL) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    valid_plugins = {}
-                    for key, plugin in data.items():
-                        if "repo" in plugin:
-                            valid_plugins[key] = plugin
-                    self.plugins_data = valid_plugins
-                else:
-                    logger.error(f"获取插件数据失败，状态码: {response.status}")
-        except Exception as e:
-            logger.error(f"获取插件数据异常: {str(e)}")
-            self.plugins_data = {}
+        """获取插件数据，支持多API地址重试"""
+        for i, api_url in enumerate(PLUGIN_API_URLS):
+            try:
+                logger.info(f"尝试从插件API地址 {i+1}/{len(PLUGIN_API_URLS)} 获取数据: {api_url}")
+                async with self.session.get(api_url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        valid_plugins = {}
+                        for key, plugin in data.items():
+                            if "repo" in plugin:
+                                valid_plugins[key] = plugin
+                        self.plugins_data = valid_plugins
+                        logger.info(f"成功从插件API地址 {i+1} 获取到 {len(valid_plugins)} 个插件数据")
+                        return
+                    else:
+                        logger.warning(f"从插件API地址 {i+1} 获取数据失败，状态码: {response.status}")
+            except Exception as e:
+                logger.error(f"从插件API地址 {i+1} 获取数据异常: {str(e)}")
+                
+            # 如果不是最后一个地址，继续尝试下一个
+            if i < len(PLUGIN_API_URLS) - 1:
+                logger.warning(f"正在尝试下一个插件API地址...")
+        
+        # 所有地址都失败
+        logger.error(f"所有插件API地址均无法获取数据")
+        self.plugins_data = {}
 
     def sort_plugins(self, plugins):
         """按插件在plugins_data中的原始索引（实际编号）排序"""
-        # 获取plugins_data的键列表（原始顺序，即编号顺序）
+        # 获取plugins_data的键列表
         original_order = list(self.plugins_data.keys())
         # 按插件在原始列表中的索引位置排序
         return sorted(plugins.items(), key=lambda x: original_order.index(x[0]))
@@ -94,20 +109,20 @@ class PluginMarket(Star):
         
         for i, (endpoint, endpoint_name) in enumerate(attempts):
             try:
-                # 输出当前尝试的地址
+                # 输出当前尝试的地址（无论是否第一次）
                 logger.info(f"开始渲染尝试 {i+1}/{len(attempts)}：使用{endpoint_name} {endpoint}")
                 
-                if i > 0:  # 第二次尝试，明确输出切换日志
+                if i > 0:  # 第二次尝试（备用地址）时，明确输出切换日志
                     logger.warning(f"主渲染地址失败，已切换到{endpoint_name}：{endpoint}")
                 
-                # 切换当前渲染地址
+                # 切换当前渲染地址（即使是第一次尝试，也显式设置，避免地址残留）
                 self.renderer.set_network_endpoint(endpoint)
                 return await self.renderer.render_custom_template(html_content, data)
                 
             except Exception as e:
                 # 明确输出当前尝试失败的详细信息
                 logger.error(f"渲染尝试 {i+1}（{endpoint_name}）失败: {str(e)}")
-                # 若不是最后一次尝试，继续循环
+                # 若不是最后一次尝试，继续循环（进入下一个地址）
                 if i < len(attempts) - 1:
                     continue
                 # 最后一次尝试失败，抛出异常
@@ -143,7 +158,7 @@ class PluginMarket(Star):
         try:
             template = self.template_env.get_template("plugin_list_template.html")
             html_content = template.render(**render_data)
-            # 使用备用地址渲染
+            # 使用带备用地址的渲染方法
             img_url = await self.render_with_fallback(html_content, {})
             return img_url
         except Exception as e:
@@ -181,6 +196,7 @@ class PluginMarket(Star):
         end_idx = start_idx + self.page_size
         current_plugins = sorted_plugins[start_idx:end_idx]
 
+        # 使用插件在原始列表中的索引作为编号
         plugin_items = [
             {
                 "index": list(self.plugins_data.keys()).index(plugin_key) + 1,
@@ -213,6 +229,7 @@ class PluginMarket(Star):
     @filter.command("插件搜索")
     async def search_plugins(self, event: AstrMessageEvent):
         await self.fetch_plugin_data()
+        
         # 检查是否有搜索关键词
         if event.message_str is None:
             try:
@@ -291,7 +308,6 @@ class PluginMarket(Star):
             list(self.plugins_data.keys()).index(plugin_key) + 1
             for plugin_key, _ in sorted_matches
         ]
-
         plugin_items = [
             {
                 "index": original_indices[start_idx + i],
@@ -323,6 +339,7 @@ class PluginMarket(Star):
             )
 
     def _filter_plugins_by_search_term(self, term: str) -> Dict[str, dict]:
+        # 确保搜索词是字符串，避免None
         if term is None:
             return {}
         term_lower = term.lower()
@@ -330,7 +347,7 @@ class PluginMarket(Star):
             key: plugin
             for key, plugin in self.plugins_data.items()
             if term_lower in key.lower()
-            # 处理可能的None值
+            # 强制转换为字符串，处理可能的None值
             or term_lower in str(plugin.get("desc", "")).lower()
             or term_lower in str(plugin.get("author", "")).lower()
         }
@@ -349,7 +366,7 @@ class PluginMarket(Star):
             return
 
         if self._is_github_repo_url(arg):
-            yield event.plain_result("检测到GitHub仓库URL，准备从URL安装插件")
+            yield event.plain_result("🔗 检测到GitHub仓库URL，准备从URL安装插件")
             async for result in self._install_plugin_from_url(arg, event):
                 yield result
             return
@@ -420,7 +437,7 @@ class PluginMarket(Star):
             }
 
             self.plugins_dir.mkdir(parents=True, exist_ok=True)
-            yield event.plain_result(f" 开始从URL安装插件: {plugin_name}")
+            yield event.plain_result(f"开始从URL安装插件: {plugin_name}")
 
             await self.manage_plugin(
                 plugin_name,
@@ -598,7 +615,7 @@ class PluginMarket(Star):
 
         # 生成标题
         sort_text = "更新时间" if sort_type == "time" else "Star数量"
-        title = f"🏆 插件排行榜（按{sort_text}排序）(第{page}/{total_pages}页)"
+        title = f"插件排行榜（按{sort_text}排序）(第{page}/{total_pages}页)"
 
         try:
             # 渲染图片
