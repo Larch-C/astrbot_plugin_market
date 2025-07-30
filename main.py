@@ -13,6 +13,9 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+# 导入 HtmlRenderer
+from astrbot.core.utils.t2i.renderer import HtmlRenderer
+
 # 插件API地址
 PLUGIN_API_URL = "https://api.soulter.top/astrbot/plugins"
 
@@ -24,7 +27,7 @@ GITHUB_REPO_REGEX = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.1.0",
+    "1.2.0",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
@@ -37,19 +40,16 @@ class PluginMarket(Star):
         self.proxy = context._config.get("proxy", None)
         self.plugin_manager = context._star_manager
         self.httpx_async_client = httpx.AsyncClient(proxy=self.proxy)
-
+        
+        # 渲染配置
+        self.render_endpoint = "https://t2i.soulter.top/text2img"  
+        self.fallback_render_endpoint = "https://t2i.astrbot.uk" 
+        self.renderer = HtmlRenderer(self.render_endpoint)
+        
         # 初始化Jinja2模板环境
         self.template_env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(Path(__file__).parent / "templates"),
             autoescape=True,
-        )
-
-        # 新增：验证模板文件是否存在（调试用）
-        template_path = (
-            Path(__file__).parent / "templates" / "plugin_list_template.html"
-        )
-        logger.info(
-            f"模板文件路径: {template_path}，是否存在: {template_path.exists()}"
         )
 
     async def on_load(self):
@@ -84,7 +84,38 @@ class PluginMarket(Star):
         # 按插件在原始列表中的索引位置排序
         return sorted(plugins.items(), key=lambda x: original_order.index(x[0]))
 
-    # 渲染插件列表图片（修正html_render参数）
+    # 渲染插件列表图片
+    async def render_with_fallback(self, html_content, data={}):
+        """尝试使用主渲染地址，如果失败则使用备用地址（优化日志输出）"""
+        attempts = [
+            (self.render_endpoint, "主渲染地址"),
+            (self.fallback_render_endpoint, "备用渲染地址")
+        ]
+        
+        for i, (endpoint, endpoint_name) in enumerate(attempts):
+            try:
+                # 输出当前尝试的地址
+                logger.info(f"开始渲染尝试 {i+1}/{len(attempts)}：使用{endpoint_name} {endpoint}")
+                
+                if i > 0:  # 第二次尝试，明确输出切换日志
+                    logger.warning(f"主渲染地址失败，已切换到{endpoint_name}：{endpoint}")
+                
+                # 切换当前渲染地址
+                self.renderer.set_network_endpoint(endpoint)
+                return await self.renderer.render_custom_template(html_content, data)
+                
+            except Exception as e:
+                # 明确输出当前尝试失败的详细信息
+                logger.error(f"渲染尝试 {i+1}（{endpoint_name}）失败: {str(e)}")
+                # 若不是最后一次尝试，继续循环
+                if i < len(attempts) - 1:
+                    continue
+                # 最后一次尝试失败，抛出异常
+                raise RuntimeError(f"所有渲染地址（共{len(attempts)}个）均失败")
+
+        raise RuntimeError("未执行任何渲染尝试")
+
+    # 渲染插件列表图片
     async def render_plugin_list_image(
         self,
         plugins: List[Dict[str, Any]],
@@ -112,8 +143,8 @@ class PluginMarket(Star):
         try:
             template = self.template_env.get_template("plugin_list_template.html")
             html_content = template.render(**render_data)
-            # 关键修正：补充第二个参数（空字典）
-            img_url = await self.html_render(html_content, {})  # 修正参数
+            # 使用备用地址渲染
+            img_url = await self.render_with_fallback(html_content, {})
             return img_url
         except Exception as e:
             logger.error(f"模板渲染失败: {str(e)}")
@@ -150,13 +181,12 @@ class PluginMarket(Star):
         end_idx = start_idx + self.page_size
         current_plugins = sorted_plugins[start_idx:end_idx]
 
-        # 修改：补充stars和updated_at字段
         plugin_items = [
             {
                 "index": list(self.plugins_data.keys()).index(plugin_key) + 1,
                 "key": plugin_key,
-                "author": plugin_info.get("author", "未标注作者"),
-                "desc": plugin_info.get("desc", "无描述信息"),
+                "author": str(plugin_info.get("author", "未标注作者")),
+                "desc": str(plugin_info.get("desc", "无描述信息")),
                 "stars": plugin_info.get("stars", 0),
                 "updated_at": self._format_time(plugin_info.get("updated_at", "")),
             }
@@ -183,6 +213,23 @@ class PluginMarket(Star):
     @filter.command("插件搜索")
     async def search_plugins(self, event: AstrMessageEvent):
         await self.fetch_plugin_data()
+        # 检查是否有搜索关键词
+        if event.message_str is None:
+            try:
+                img_url = await self.render_plugin_list_image(
+                    plugins=[],
+                    total_items=0,
+                    page=1,
+                    total_pages=0,
+                    title="🔍 插件搜索结果",
+                    is_search=True,
+                    search_term="",
+                )
+                yield event.image_result(img_url)
+            except:
+                yield event.plain_result("请输入搜索关键词（如：插件搜索 天气）")
+            return
+
         input_str = event.message_str.strip()
         search_part = input_str[4:].strip() if len(input_str) >= 4 else ""
         if not search_part:
@@ -245,13 +292,12 @@ class PluginMarket(Star):
             for plugin_key, _ in sorted_matches
         ]
 
-        # 修改：补充stars和updated_at字段
         plugin_items = [
             {
                 "index": original_indices[start_idx + i],
                 "key": plugin_key,
-                "author": plugin_info.get("author", "未标注作者"),
-                "desc": plugin_info.get("desc", "无描述信息"),
+                "author": str(plugin_info.get("author", "未标注作者")),
+                "desc": str(plugin_info.get("desc", "无描述信息")),
                 "stars": plugin_info.get("stars", 0),
                 "updated_at": self._format_time(plugin_info.get("updated_at", "")),
             }
@@ -277,13 +323,16 @@ class PluginMarket(Star):
             )
 
     def _filter_plugins_by_search_term(self, term: str) -> Dict[str, dict]:
+        if term is None:
+            return {}
         term_lower = term.lower()
         return {
             key: plugin
             for key, plugin in self.plugins_data.items()
             if term_lower in key.lower()
-            or term_lower in plugin.get("desc", "").lower()
-            or term_lower in plugin.get("author", "").lower()
+            # 处理可能的None值
+            or term_lower in str(plugin.get("desc", "")).lower()
+            or term_lower in str(plugin.get("author", "")).lower()
         }
 
     @filter.command("插件安装")
@@ -300,7 +349,7 @@ class PluginMarket(Star):
             return
 
         if self._is_github_repo_url(arg):
-            yield event.plain_result("🔗 检测到GitHub仓库URL，准备从URL安装插件")
+            yield event.plain_result("检测到GitHub仓库URL，准备从URL安装插件")
             async for result in self._install_plugin_from_url(arg, event):
                 yield result
             return
@@ -511,7 +560,7 @@ class PluginMarket(Star):
                     total_items=0,
                     page=1,
                     total_pages=0,
-                    title="🏆 插件排行榜",
+                    title="插件排行榜",
                 )
                 yield event.image_result(img_url)
             except:
@@ -540,8 +589,8 @@ class PluginMarket(Star):
                 {
                     "index": original_indices[start_idx + i],
                     "key": plugin_key,
-                    "author": plugin_info.get("author", "未标注作者"),
-                    "desc": plugin_info.get("desc", "无描述信息"),
+                    "author": str(plugin_info.get("author", "未标注作者")),
+                    "desc": str(plugin_info.get("desc", "无描述信息")),
                     "stars": plugin_info.get("stars", 0),
                     "updated_at": self._format_time(plugin_info.get("updated_at", "")),
                 }
@@ -610,4 +659,4 @@ class PluginMarket(Star):
             return time_str
         except Exception as e:
             logger.warning(f"时间格式解析失败: {time_str}, 错误: {e}")
-            return time_str
+            return time_str    
