@@ -1,8 +1,17 @@
 {
-  "proxy_list": {
-    "description": "GitHub代理加速地址列表。",
+  "render_endpoints": {
+    "description": "图片渲染API地址列表。将按顺序尝试，第一个失败后会自动使用下一个。",
     "type": "list",
-    "hint": "将可用的代理地址填入即可，下载前会自动进行速度测试并排序。如果所有代理都失败，最后会尝试不使用代理直接连接。",
+    "hint": "列表中的第一个地址被视为主地址，其余为备用地址。",
+    "default": [
+      "https://t2i.soulter.top/text2img",
+      "https://t2i.astrbot.uk"
+    ]
+  },
+  "proxy_list": {
+    "description": "GitHub代理加速地址列表。插件在下载前会自动测试并优先使用其中最快的线路。",
+    "type": "list",
+    "hint": "您无需关心列表中的顺序，只需将所有可用的代理地址填入即可。系统会自动进行速度测试并排序。如果所有代理都失败，最后会尝试不使用代理直接连接。",
     "default": [
       "https://gh.llkk.cc",
       "https://edgeone.gh-proxy.com",
