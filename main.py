@@ -16,6 +16,8 @@ import markdown
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+
+# 导入 HtmlRenderer
 from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
 # 插件API地址（主地址和备用地址）
@@ -34,7 +36,7 @@ PROXY_TEST_URL = "https://api.github.com"
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.4.0",
+    "1.3.0",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
@@ -48,10 +50,10 @@ class PluginMarket(Star):
         self.plugins_dir = Path("./data/plugins")
         self.plugin_manager = context._star_manager
         self.httpx_async_client = httpx.AsyncClient()
-
-        self.render_endpoint = "https://t2i.soulter.top/text2img"
-        self.fallback_render_endpoint = "https://t2i.astrbot.uk"
-        self.renderer = HtmlRenderer(self.render_endpoint)
+        endpoints = self.config.get(
+            "render_endpoints", ["https://t2i.soulter.top/text2img"] # 会从配置中读取，但提供一个默认值，此地址并不会实际使用
+        )
+        self.renderer = HtmlRenderer(endpoints[0] if endpoints else "")
 
         self.template_env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(Path(__file__).parent / "templates"),
@@ -102,11 +104,17 @@ class PluginMarket(Star):
         return sorted(plugins.items(), key=lambda x: original_order.index(x[0]))
 
     async def render_with_fallback(self, html_content, data={}):
-        """尝试使用主渲染地址，如果失败则使用备用地址"""
-        attempts = [
-            (self.render_endpoint, "主渲染地址"),
-            (self.fallback_render_endpoint, "备用渲染地址"),
-        ]
+        """从配置动读取渲染地址列表"""
+        endpoints = self.config.get("render_endpoints", [])
+        if not endpoints:
+            raise RuntimeError("插件配置中未设置任何图片渲染地址。")
+
+        # 构建渲染地址列表
+        attempts = []
+        if endpoints:
+            attempts.append((endpoints[0], "主渲染地址"))
+            for i, endpoint in enumerate(endpoints[1:]):
+                attempts.append((endpoint, f"备用渲染地址 {i + 1}"))
 
         for i, (endpoint, endpoint_name) in enumerate(attempts):
             try:
@@ -115,16 +123,19 @@ class PluginMarket(Star):
                 )
                 if i > 0:
                     logger.warning(
-                        f"主渲染地址失败，已切换到{endpoint_name}：{endpoint}"
+                        f"上一个地址失败，已切换到{endpoint_name}：{endpoint}"
                     )
+
                 self.renderer.set_network_endpoint(endpoint)
                 return await self.renderer.render_custom_template(html_content, data)
+
             except Exception as e:
-                logger.error(f"渲染尝试 {i + 1}（{endpoint_name}）失败: {str(e)}")
+                logger.error(f"渲染尝试 {i + 1} ({endpoint_name}) 失败: {str(e)}")
                 if i < len(attempts) - 1:
                     continue
                 raise RuntimeError(f"所有渲染地址（共{len(attempts)}个）均失败")
-        raise RuntimeError("未执行任何渲染尝试")
+
+        raise RuntimeError("未执行任何渲染尝试，请检查配置。")
 
     async def render_plugin_list_image(
         self,
@@ -137,7 +148,7 @@ class PluginMarket(Star):
         search_term: str = "",
         next_page_command: str = "",
     ) -> str:
-        """渲染插件列表图片"""
+        """渲染插件列表图片（共用逻辑）"""
         render_data = {
             "title": title,
             "is_search": is_search,
@@ -301,7 +312,9 @@ class PluginMarket(Star):
             else None
         )
         if not arg:
-            yield event.plain_result("请指定要安装的插件编号、插件名或GitHub仓库URL。")
+            yield event.plain_result(
+                "请指定要安装的插件编号、完整键名或GitHub仓库URL。"
+            )
             return
 
         if self._is_github_repo_url(arg):
@@ -328,7 +341,6 @@ class PluginMarket(Star):
             )
             await self.load_plugin(plugin_key)
             yield event.plain_result(f"插件 {plugin_key} 安装并加载成功！")
-
             # 发送README文档
             async for readme_msg in self._send_readme_as_image(plugin_key, event):
                 yield readme_msg
@@ -369,7 +381,6 @@ class PluginMarket(Star):
             )
             await self.load_plugin(repo_name)
             yield event.plain_result(f"插件 {repo_name} 从URL安装并加载成功！")
-
             # 发送README文档
             async for readme_msg in self._send_readme_as_image(repo_name, event):
                 yield readme_msg
@@ -403,7 +414,7 @@ class PluginMarket(Star):
             raise RuntimeError(f"下载插件 {plugin_key} 时出错: {e}") from e
 
     async def _test_proxy_latency(self, proxy: str) -> Tuple[str, float]:
-        """测试单个代理的延迟（ms），失败则返回无限大延迟"""
+        """测试代理的延迟（ms），失败则返回无限大延迟"""
         try:
             test_full_url = f"{proxy.rstrip('/')}/{PROXY_TEST_URL}"
             start_time = time.monotonic()
@@ -438,7 +449,7 @@ class PluginMarket(Star):
         return [p[0] for p in working_proxies]
 
     async def get_git_repo(self, url: str, target_path: Path):
-        """从 Git 仓库下载插件并解压到指定路径"""
+        """从 Git 仓库下载插件"""
         temp_dir = Path(tempfile.mkdtemp())
         try:
             match = GITHUB_REPO_REGEX.match(url)
@@ -543,7 +554,7 @@ class PluginMarket(Star):
                 raise RuntimeError(f"加载插件失败: {e}, 重载也失败: {reload_err}")
 
     async def _send_readme_as_image(self, plugin_key: str, event: AstrMessageEvent):
-        """查找、转换并发送插件的README文档图片。"""
+        """发送插件的README文档"""
         plugin_path = self.plugins_dir / plugin_key
         readme_path = plugin_path / "README.md"
 
@@ -552,7 +563,7 @@ class PluginMarket(Star):
             return
 
         try:
-            logger.info(f"找到插件 {plugin_key} 的 README.md，准备渲染...")
+            logger.info(f"渲染插件 {plugin_key} 的 README.md.")
             readme_content = readme_path.read_text(encoding="utf-8")
             html_body = markdown.markdown(
                 readme_content, extensions=["fenced_code", "tables"]
