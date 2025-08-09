@@ -1,0 +1,13 @@
+{
+  "proxy_list": {
+    "description": "GitHub代理加速地址列表。",
+    "type": "list",
+    "hint": "将可用的代理地址填入即可，下载前会自动进行速度测试并排序。如果所有代理都失败，最后会尝试不使用代理直接连接。",
+    "default": [
+      "https://gh.llkk.cc",
+      "https://edgeone.gh-proxy.com",
+      "https://hk.gh-proxy.com",
+      "https://gh-proxy.com"
+    ]
+  }
+}
