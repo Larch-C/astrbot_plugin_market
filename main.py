@@ -12,12 +12,11 @@ import aiohttp
 import httpx
 import jinja2
 import markdown
+from PIL import Image, UnidentifiedImageError
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-
-# 导入 HtmlRenderer
 from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
 # 插件API地址（主地址和备用地址）
@@ -36,7 +35,7 @@ PROXY_TEST_URL = "https://api.github.com"
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.3.0",
+    "1.3.1",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
@@ -104,38 +103,62 @@ class PluginMarket(Star):
         return sorted(plugins.items(), key=lambda x: original_order.index(x[0]))
 
     async def render_with_fallback(self, html_content, data={}):
-        """从配置动读取渲染地址列表"""
+        """从配置动态读取渲染地址列表，并验证返回的是否为有效图片。"""
         endpoints = self.config.get("render_endpoints", [])
         if not endpoints:
             raise RuntimeError("插件配置中未设置任何图片渲染地址。")
 
-        # 构建渲染地址列表
         attempts = []
-        if endpoints:
-            attempts.append((endpoints[0], "主渲染地址"))
-            for i, endpoint in enumerate(endpoints[1:]):
-                attempts.append((endpoint, f"备用渲染地址 {i + 1}"))
-
+        for i, endpoint in enumerate(endpoints):
+            address_number = i + 1
+            if address_number == 1:
+                endpoint_name = f"第一个地址 (主地址)"
+            else:
+                endpoint_name = f"第{address_number}个地址 (备用)"
+            attempts.append((endpoint, endpoint_name))
+        
+        last_error = None
         for i, (endpoint, endpoint_name) in enumerate(attempts):
             try:
                 logger.info(
                     f"开始渲染尝试 {i + 1}/{len(attempts)}：使用{endpoint_name} {endpoint}"
                 )
-                if i > 0:
-                    logger.warning(
-                        f"上一个地址失败，已切换到{endpoint_name}：{endpoint}"
-                    )
-
                 self.renderer.set_network_endpoint(endpoint)
-                return await self.renderer.render_custom_template(html_content, data)
+                img_local_path = await self.renderer.render_custom_template(html_content, data)
+
+                if not img_local_path or not isinstance(img_local_path, str):
+                    raise RuntimeError("渲染服务未返回有效的文件路径。")
+
+                logger.info(f"获取到本地图片路径: {img_local_path}，开始读取并验证其有效性...")
+                
+                try:
+                    with open(img_local_path, "rb") as f:
+                        image_data = f.read()
+                except FileNotFoundError:
+                    raise RuntimeError(f"渲染器返回的路径无效或文件不存在: {img_local_path}")
+
+                image_stream = BytesIO(image_data)
+                
+                try:
+                    with Image.open(image_stream) as img:
+                        img.verify()
+                except UnidentifiedImageError:
+                    error_message_preview = image_data.decode('utf-8', errors='ignore')[:100]
+                    raise RuntimeError(f"文件内容不是有效的图片。内容预览: '{error_message_preview}... '")
+                except Exception as img_err:
+                    raise RuntimeError(f"验证图像时发生未知错误: {img_err}")
+
+                logger.info(f"成功使用 {endpoint_name} 渲染并验证为有效图片。")
+                return img_local_path
 
             except Exception as e:
+                last_error = e
                 logger.error(f"渲染尝试 {i + 1} ({endpoint_name}) 失败: {str(e)}")
                 if i < len(attempts) - 1:
+                    logger.warning(f"正在切换到下一个渲染地址...")
                     continue
-                raise RuntimeError(f"所有渲染地址（共{len(attempts)}个）均失败")
-
-        raise RuntimeError("未执行任何渲染尝试，请检查配置。")
+        
+        raise RuntimeError(f"所有渲染地址（共{len(attempts)}个）均失败。最后一次错误: {last_error}")
 
     async def render_plugin_list_image(
         self,
@@ -148,7 +171,7 @@ class PluginMarket(Star):
         search_term: str = "",
         next_page_command: str = "",
     ) -> str:
-        """渲染插件列表图片（共用逻辑）"""
+        """渲染插件列表图片"""
         render_data = {
             "title": title,
             "is_search": is_search,
