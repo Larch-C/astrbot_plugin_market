@@ -1,12 +1,7 @@
-import asyncio
 import re
-import shutil
-import tempfile
-import time
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from zipfile import ZipFile
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 import httpx
@@ -19,15 +14,11 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
-# 插件API地址（主地址和备用地址）
 PLUGIN_API_URLS = [
     "https://api.soulter.top/astrbot/plugins",
     "https://plugin.astrbot.uk",
 ]
-
-# GitHub仓库URL正则表达式
 GITHUB_REPO_REGEX = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$")
-# 用于测试代理连通性的稳定URL
 PROXY_TEST_URL = "https://api.github.com"
 
 
@@ -35,14 +26,13 @@ PROXY_TEST_URL = "https://api.github.com"
     "astrbot_plugin_market",
     "长安某",
     "插件市场",
-    "1.3.1",
+    "1.4.0",
     "https://github.com/zgojin/astrbot_plugin_market",
 )
 class PluginMarket(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-
         self.session = aiohttp.ClientSession()
         self.plugins_data = {}
         self.page_size = 10
@@ -50,10 +40,9 @@ class PluginMarket(Star):
         self.plugin_manager = context._star_manager
         self.httpx_async_client = httpx.AsyncClient()
         endpoints = self.config.get(
-            "render_endpoints", ["https://t2i.soulter.top/text2img"] # 会从配置中读取，但提供一个默认值，此地址并不会实际使用
+            "render_endpoints", ["https://t2i.soulter.top/text2img"]
         )
         self.renderer = HtmlRenderer(endpoints[0] if endpoints else "")
-
         self.template_env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(Path(__file__).parent / "templates"),
             autoescape=True,
@@ -93,7 +82,6 @@ class PluginMarket(Star):
                 logger.error(f"从插件API地址 {i + 1} 获取数据异常: {str(e)}")
                 if i < len(PLUGIN_API_URLS) - 1:
                     logger.warning("正在尝试下一个插件API地址...")
-
         logger.error("所有插件API地址均无法获取数据")
         self.plugins_data = {}
 
@@ -103,20 +91,19 @@ class PluginMarket(Star):
         return sorted(plugins.items(), key=lambda x: original_order.index(x[0]))
 
     async def render_with_fallback(self, html_content, data={}):
-        """从配置动态读取渲染地址列表，并验证返回的是否为有效图片。"""
+        """从配置动态读取渲染地址列表，并验证返回的是否为有效图片"""
         endpoints = self.config.get("render_endpoints", [])
         if not endpoints:
-            raise RuntimeError("插件配置中未设置任何图片渲染地址。")
-
+            raise RuntimeError("插件配置中未设置任何图片渲染地址")
         attempts = []
         for i, endpoint in enumerate(endpoints):
             address_number = i + 1
-            if address_number == 1:
-                endpoint_name = f"第一个地址 (主地址)"
-            else:
-                endpoint_name = f"第{address_number}个地址 (备用)"
+            endpoint_name = (
+                "第一个地址 (主地址)"
+                if address_number == 1
+                else f"第{address_number}个地址 (备用)"
+            )
             attempts.append((endpoint, endpoint_name))
-        
         last_error = None
         for i, (endpoint, endpoint_name) in enumerate(attempts):
             try:
@@ -124,41 +111,43 @@ class PluginMarket(Star):
                     f"开始渲染尝试 {i + 1}/{len(attempts)}：使用{endpoint_name} {endpoint}"
                 )
                 self.renderer.set_network_endpoint(endpoint)
-                img_local_path = await self.renderer.render_custom_template(html_content, data)
-
+                img_local_path = await self.renderer.render_custom_template(
+                    html_content, data
+                )
                 if not img_local_path or not isinstance(img_local_path, str):
-                    raise RuntimeError("渲染服务未返回有效的文件路径。")
-
-                logger.info(f"获取到本地图片路径: {img_local_path}，开始读取并验证其有效性...")
-                
+                    raise RuntimeError("渲染服务未返回有效的文件路径")
+                logger.info("验证图片有效性...")
                 try:
                     with open(img_local_path, "rb") as f:
                         image_data = f.read()
                 except FileNotFoundError:
-                    raise RuntimeError(f"渲染器返回的路径无效或文件不存在: {img_local_path}")
-
+                    raise RuntimeError(
+                        f"渲染器返回的路径无效或文件不存在: {img_local_path}"
+                    )
                 image_stream = BytesIO(image_data)
-                
                 try:
                     with Image.open(image_stream) as img:
                         img.verify()
                 except UnidentifiedImageError:
-                    error_message_preview = image_data.decode('utf-8', errors='ignore')[:100]
-                    raise RuntimeError(f"文件内容不是有效的图片。内容预览: '{error_message_preview}... '")
+                    error_message_preview = image_data.decode("utf-8", errors="ignore")[
+                        :100
+                    ]
+                    raise RuntimeError(
+                        f"文件内容不是有效的图片内容预览: '{error_message_preview}... '"
+                    )
                 except Exception as img_err:
                     raise RuntimeError(f"验证图像时发生未知错误: {img_err}")
-
-                logger.info(f"成功使用 {endpoint_name} 渲染并验证为有效图片。")
+                logger.info(f"成功使用 {endpoint_name} 渲染并验证为有效图片")
                 return img_local_path
-
             except Exception as e:
                 last_error = e
                 logger.error(f"渲染尝试 {i + 1} ({endpoint_name}) 失败: {str(e)}")
                 if i < len(attempts) - 1:
-                    logger.warning(f"正在切换到下一个渲染地址...")
+                    logger.warning("正在切换到下一个渲染地址...")
                     continue
-        
-        raise RuntimeError(f"所有渲染地址（共{len(attempts)}个）均失败。最后一次错误: {last_error}")
+        raise RuntimeError(
+            f"所有渲染地址（共{len(attempts)}个）均失败最后一次错误: {last_error}"
+        )
 
     async def render_plugin_list_image(
         self,
@@ -183,7 +172,6 @@ class PluginMarket(Star):
             "has_next_page": page < total_pages,
             "next_page_command": next_page_command,
         }
-
         try:
             template = self.template_env.get_template("plugin_list_template.html")
             html_content = template.render(**render_data)
@@ -194,11 +182,11 @@ class PluginMarket(Star):
 
     @filter.command("插件市场")
     async def show_plugin_market(self, event: AstrMessageEvent):
+        """显示官方插件市场列表"""
         await self.fetch_plugin_data()
         args = event.message_str.strip().split()
         page = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
         total_plugins = len(self.plugins_data)
-
         if total_plugins == 0:
             try:
                 img_url = await self.render_plugin_list_image(
@@ -208,14 +196,12 @@ class PluginMarket(Star):
             except:
                 yield event.plain_result("暂无插件数据")
             return
-
         total_pages = (total_plugins + self.page_size - 1) // self.page_size
         page = max(1, min(page, total_pages))
         sorted_plugins = self.sort_plugins(self.plugins_data)
         start_idx = (page - 1) * self.page_size
         end_idx = start_idx + self.page_size
         current_plugins = sorted_plugins[start_idx:end_idx]
-
         plugin_items = [
             {
                 "index": list(self.plugins_data.keys()).index(plugin_key) + 1,
@@ -227,7 +213,6 @@ class PluginMarket(Star):
             }
             for plugin_key, plugin_info in current_plugins
         ]
-
         try:
             img_url = await self.render_plugin_list_image(
                 plugins=plugin_items,
@@ -246,14 +231,13 @@ class PluginMarket(Star):
 
     @filter.command("插件搜索")
     async def search_plugins(self, event: AstrMessageEvent):
+        """根据关键词搜索插件"""
         await self.fetch_plugin_data()
-
         input_str = event.message_str.strip()
         search_part = input_str[4:].strip() if len(input_str) >= 4 else ""
         if not search_part:
             yield event.plain_result("请输入搜索关键词，例如：/插件搜索 天气")
             return
-
         parts = search_part.split()
         page = 1
         search_term = ""
@@ -265,25 +249,20 @@ class PluginMarket(Star):
                 search_term = search_part
         else:
             search_term = search_part
-
         if not search_term:
             yield event.plain_result("请输入搜索关键词，例如：/插件搜索 天气")
             return
-
         matched_plugins = self._filter_plugins_by_search_term(search_term)
         total_matches = len(matched_plugins)
-
         if total_matches == 0:
-            yield event.plain_result(f"未找到包含 '{search_term}' 的插件。")
+            yield event.plain_result(f"未找到包含 '{search_term}' 的插件")
             return
-
         total_pages = (total_matches + self.page_size - 1) // self.page_size
         page = max(1, min(page, total_pages))
         sorted_matches = sorted(matched_plugins.items(), key=lambda x: x[0])
         start_idx = (page - 1) * self.page_size
         end_idx = start_idx + self.page_size
         current_matches = sorted_matches[start_idx:end_idx]
-
         plugin_items = [
             {
                 "index": list(self.plugins_data.keys()).index(plugin_key) + 1,
@@ -295,7 +274,6 @@ class PluginMarket(Star):
             }
             for plugin_key, plugin_info in current_matches
         ]
-
         try:
             img_url = await self.render_plugin_list_image(
                 plugins=plugin_items,
@@ -311,7 +289,7 @@ class PluginMarket(Star):
         except Exception as e:
             logger.error(f"搜索结果图片生成失败: {str(e)}")
             yield event.plain_result(
-                f"图片生成失败，搜索 '{search_term}' 共找到{total_matches}个结果。"
+                f"图片生成失败，搜索 '{search_term}' 共找到{total_matches}个结果"
             )
 
     def _filter_plugins_by_search_term(self, term: str) -> Dict[str, dict]:
@@ -329,280 +307,226 @@ class PluginMarket(Star):
     @filter.command("插件安装")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def install_plugin(self, event: AstrMessageEvent):
+        """通过编号、键名或URL安装插件"""
         arg = (
             event.message_str.strip().split()[1]
             if len(event.message_str.strip().split()) > 1
             else None
         )
         if not arg:
-            yield event.plain_result(
-                "请指定要安装的插件编号、完整键名或GitHub仓库URL。"
-            )
+            yield event.plain_result("请指定要安装的插件编号、键名或GitHub仓库URL")
             return
-
-        if self._is_github_repo_url(arg):
-            yield event.plain_result("检测到GitHub仓库URL，准备从URL安装插件...")
-            async for result in self._install_plugin_from_url(arg, event):
-                yield result
-            return
-
-        plugin_key = self._get_plugin_key_from_arg(arg)
-        if not plugin_key:
-            yield event.plain_result(f"未找到插件: {arg}")
-            return
-
-        plugin_info = self.plugins_data.get(plugin_key)
-        if not plugin_info or not plugin_info.get("repo"):
-            yield event.plain_result(f"插件 {plugin_key} 缺少仓库地址，无法安装。")
-            return
-
+        display_name = arg
+        if not self._is_github_repo_url(arg):
+            plugin_key = self._get_plugin_key_from_arg(arg)
+            if plugin_key:
+                display_name = plugin_key
+        yield event.plain_result(f"开始安装插件: {display_name}...")
         try:
-            self.plugins_dir.mkdir(parents=True, exist_ok=True)
-            yield event.plain_result(f"开始安装插件: {plugin_key}")
-            await self.manage_plugin(
-                plugin_key, plugin_info, self.plugins_dir, is_update=False
-            )
-            await self.load_plugin(plugin_key)
-            yield event.plain_result(f"插件 {plugin_key} 安装并加载成功！")
-            # 发送README文档
-            async for readme_msg in self._send_readme_as_image(plugin_key, event):
-                yield readme_msg
-
+            repo_url = arg
+            if not self._is_github_repo_url(arg):
+                plugin_key = self._get_plugin_key_from_arg(arg)
+                if not plugin_key:
+                    yield event.plain_result(f"未在市场中找到插件: {arg}")
+                    return
+                plugin_info_market = self.plugins_data.get(plugin_key)
+                if not plugin_info_market or not plugin_info_market.get("repo"):
+                    yield event.plain_result(
+                        f"插件 {plugin_key} 缺少仓库地址，无法安装"
+                    )
+                    return
+                repo_url = plugin_info_market["repo"]
+            installed_info = await self.plugin_manager.install_plugin(repo_url)
+            if installed_info and installed_info.get("name"):
+                plugin_name = installed_info["name"]
+                yield event.plain_result(f"插件 '{plugin_name}' 安装并加载成功！")
+                if installed_info.get("readme"):
+                    try:
+                        html_body = markdown.markdown(
+                            installed_info["readme"],
+                            extensions=["fenced_code", "tables"],
+                        )
+                        template = self.template_env.get_template(
+                            "readme_template.html"
+                        )
+                        full_html = template.render(readme_body=html_body)
+                        img_url = await self.render_with_fallback(full_html, {})
+                        yield event.image_result(img_url)
+                    except Exception as e:
+                        logger.error(f"渲染插件 {plugin_name} 的README失败: {e}")
+                        yield event.plain_result("(无法渲染插件的README文档)")
+            else:
+                yield event.plain_result(
+                    f"插件 '{display_name}' 安装成功，但未获取到插件元信息，可能需要重启以确保功能正常"
+                )
         except Exception as e:
-            logger.error(f"安装插件 {plugin_key} 失败: {e}", exc_info=True)
+            logger.error(f"安装插件 {display_name} 时发生错误: {e}", exc_info=True)
             yield event.plain_result(f"安装失败: {str(e)}")
 
+    def _get_valid_installed_plugin_dirs(self) -> List[Path]:
+        """获取并排序所有有效的本地插件目录"""
+        if not self.plugins_dir.is_dir():
+            return []
+        valid_dirs = []
+        for d in self.plugins_dir.iterdir():
+            if d.is_dir() and not d.name.endswith("_backup"):
+                if (d / "main.py").is_file():
+                    valid_dirs.append(d)
+        return sorted(valid_dirs, key=lambda p: p.name)
+
+    @filter.command("已安装插件")
+    async def show_installed_plugins(self, event: AstrMessageEvent):
+        """显示本地已安装的插件列表，并生成独立的本地编号"""
+        valid_plugin_dirs = self._get_valid_installed_plugin_dirs()
+        if not valid_plugin_dirs:
+            yield event.plain_result("当前未找到任何有效的已安装插件")
+            return
+
+        await self.fetch_plugin_data()
+        args = event.message_str.strip().split()
+        page = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
+
+        plugin_items = []
+        for i, plugin_dir in enumerate(valid_plugin_dirs):
+            name = plugin_dir.name
+            plugin_info = self._get_market_info_case_insensitive(name)
+            if not plugin_info:
+                plugin_info = {
+                    "author": "未知",
+                    "desc": "这是一个本地插件",
+                    "stars": "N/A",
+                    "updated_at": "",
+                }
+
+            plugin_items.append(
+                {
+                    "index": str(i + 1),
+                    "key": name,
+                    "author": str(plugin_info.get("author", "未知作者")),
+                    "desc": str(plugin_info.get("desc", "无描述信息")),
+                    "stars": plugin_info.get("stars", 0),
+                    "updated_at": self._format_time(plugin_info.get("updated_at", "")),
+                }
+            )
+
+        total_plugins = len(plugin_items)
+        total_pages = (total_plugins + self.page_size - 1) // self.page_size
+        page = max(1, min(page, total_pages))
+        start_idx = (page - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        current_page_items = plugin_items[start_idx:end_idx]
+
+        try:
+            img_url = await self.render_plugin_list_image(
+                plugins=current_page_items,
+                total_items=total_plugins,
+                page=page,
+                total_pages=total_pages,
+                title=f"已安装插件列表 (第{page}/{total_pages}页)",
+                next_page_command=f"/已安装插件 {page + 1}",
+            )
+            yield event.image_result(img_url)
+        except Exception as e:
+            logger.error(f"已安装插件列表图片生成失败: {str(e)}")
+            yield event.plain_result(
+                f"图片生成失败，当前第{page}/{total_pages}页，共{total_plugins}个已安装插件"
+            )
+
+    @filter.command("插件卸载")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def uninstall_plugin(self, event: AstrMessageEvent):
+        """通过本地编号或插件名卸载插件"""
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            yield event.plain_result("请输入要卸载的插件的【本地编号】或【文件夹名】")
+            return
+        arg = args[1]
+        logger.info(f"接收到插件卸载指令，参数: '{arg}'")
+        plugin_dir_name_to_uninstall = arg
+
+        if arg.isdigit():
+            logger.info(f"参数 '{arg}' 是一个数字，将尝试按本地编号解析...")
+            valid_plugin_dirs = self._get_valid_installed_plugin_dirs()
+            index = int(arg) - 1
+            if 0 <= index < len(valid_plugin_dirs):
+                plugin_dir_name_to_uninstall = valid_plugin_dirs[index].name
+                logger.info(
+                    f"本地编号 {arg} 解析为插件文件夹: '{plugin_dir_name_to_uninstall}'"
+                )
+            else:
+                logger.warning(f"解析失败: 无效的本地编号 {arg}")
+                yield event.plain_result(
+                    f"无效的本地编号: {arg}请通过 /已安装插件 查看正确的编号"
+                )
+                return
+
+        logger.info(f"查找文件夹为 '{plugin_dir_name_to_uninstall}' 的已加载插件...")
+        plugin_to_uninstall = None
+        for star in self.context.get_all_stars():
+            if star.root_dir_name.lower() == plugin_dir_name_to_uninstall.lower():
+                plugin_to_uninstall = star
+                break
+
+        if plugin_to_uninstall:
+            registered_name = plugin_to_uninstall.name
+            logger.info(f"已找到加载的插件 '{registered_name}'准备卸载...")
+            try:
+                yield event.plain_result(f"正在卸载插件: {registered_name}...")
+                await self.plugin_manager.uninstall_plugin(plugin_name=registered_name)
+                logger.info(f"成功卸载插件: {registered_name}")
+                yield event.plain_result(f"插件 '{registered_name}' 已卸载成功")
+            except Exception as e:
+                logger.error(
+                    f"在卸载插件 '{registered_name}' 时报告错误: {e}", exc_info=True
+                )
+                yield event.plain_result(f"卸载失败: {str(e)}")
+        else:
+            logger.warning(
+                f"卸载失败：在已加载的插件中未找到与 '{plugin_dir_name_to_uninstall}' 匹配的插件"
+            )
+            yield event.plain_result(
+                f"卸载失败：未找到名为 '{plugin_dir_name_to_uninstall}' 的已加载插件请检查名称或编号是否正确"
+            )
+
     def _get_plugin_key_from_arg(self, arg: str) -> Optional[str]:
+        """通过编号或键名，从市场数据中获取插件的唯一键名"""
         try:
             plugin_index = int(arg) - 1
-            if 0 <= plugin_index < len(self.plugins_data):
-                return list(self.plugins_data.keys())[plugin_index]
+            sorted_keys = list(self.plugins_data.keys())
+            if 0 <= plugin_index < len(sorted_keys):
+                return sorted_keys[plugin_index]
         except ValueError:
-            return arg if arg in self.plugins_data else None
+            lower_arg = arg.lower()
+            for key in self.plugins_data:
+                if key.lower() == lower_arg:
+                    return key
         return None
 
     def _is_github_repo_url(self, url: str) -> bool:
         return bool(GITHUB_REPO_REGEX.match(url))
 
-    async def _install_plugin_from_url(self, repo_url: str, event: AstrMessageEvent):
-        try:
-            match = GITHUB_REPO_REGEX.match(repo_url)
-            if not match:
-                yield event.plain_result("无效的GitHub仓库URL格式。")
-                return
-            author, repo_name = match.group(1), match.group(2).replace(".git", "")
-            plugin_info = {
-                "repo": repo_url,
-                "name": repo_name,
-                "author": author,
-                "desc": "从URL安装的插件",
-            }
-            self.plugins_dir.mkdir(parents=True, exist_ok=True)
-            yield event.plain_result(f"开始从URL安装插件: {repo_name}")
-            await self.manage_plugin(
-                repo_name, plugin_info, self.plugins_dir, is_update=False
-            )
-            await self.load_plugin(repo_name)
-            yield event.plain_result(f"插件 {repo_name} 从URL安装并加载成功！")
-            # 发送README文档
-            async for readme_msg in self._send_readme_as_image(repo_name, event):
-                yield readme_msg
+    def _find_readme_file(self, plugin_path: Path) -> Optional[Path]:
+        """查找README.md文件"""
+        if not plugin_path.is_dir():
+            return None
+        for file in plugin_path.iterdir():
+            if file.name.lower() == "readme.md":
+                return file
+        return None
 
-        except Exception as e:
-            logger.error(f"从URL安装插件失败: {e}", exc_info=True)
-            yield event.plain_result(f"安装失败: {str(e)}")
-
-    async def manage_plugin(
-        self, plugin_key: str, plugin: dict, plugins_dir: Path, is_update: bool = False
-    ):
-        target_path = plugins_dir / plugin_key
-        backup_path = plugins_dir / f"{plugin_key}_backup" if is_update else None
-        if is_update:
-            if not target_path.exists():
-                raise ValueError(f"插件 {plugin_key} 未安装，无法更新。")
-            if backup_path.exists():
-                shutil.rmtree(backup_path)
-            shutil.copytree(target_path, backup_path)
-        try:
-            logger.info(f"正在从 {plugin['repo']} 下载插件 {plugin_key}...")
-            await self.get_git_repo(plugin["repo"], target_path)
-            logger.info(f"插件 {plugin_key} 下载成功。")
-        except Exception as e:
-            if is_update and backup_path and backup_path.exists():
-                if target_path.exists():
-                    shutil.rmtree(target_path)
-                shutil.move(str(backup_path), str(target_path))
-            elif not is_update and target_path.exists():
-                shutil.rmtree(target_path)
-            raise RuntimeError(f"下载插件 {plugin_key} 时出错: {e}") from e
-
-    async def _test_proxy_latency(self, proxy: str) -> Tuple[str, float]:
-        """测试代理的延迟（ms），失败则返回无限大延迟"""
-        try:
-            test_full_url = f"{proxy.rstrip('/')}/{PROXY_TEST_URL}"
-            start_time = time.monotonic()
-            async with httpx.AsyncClient() as client:
-                await client.head(test_full_url, timeout=10.0, follow_redirects=False)
-            latency = (time.monotonic() - start_time) * 1000
-            logger.info(f"代理 {proxy} 测试成功，延迟: {latency:.2f} ms")
-            return proxy, latency
-        except Exception as e:
-            logger.warning(f"代理 {proxy} 测试失败: {e}")
-            return proxy, float("inf")
-
-    async def _get_fastest_proxies(self) -> List[str]:
-        """并发测试所有代理并按延迟排序"""
-        configured_proxies = self.config.get("proxy_list", [])
-        if not configured_proxies:
-            return []
-
-        logger.info("开始检测代理服务器连通性...")
-        tasks = [self._test_proxy_latency(proxy) for proxy in configured_proxies]
-        results = await asyncio.gather(*tasks)
-
-        working_proxies = sorted(
-            [res for res in results if res[1] != float("inf")], key=lambda x: x[1]
-        )
-
-        if not working_proxies:
-            logger.warning("所有配置的代理服务器都无法连接。")
-            return []
-
-        logger.info(f"可用代理按速度排序: {[p[0] for p in working_proxies]}")
-        return [p[0] for p in working_proxies]
-
-    async def get_git_repo(self, url: str, target_path: Path):
-        """从 Git 仓库下载插件"""
-        temp_dir = Path(tempfile.mkdtemp())
-        try:
-            match = GITHUB_REPO_REGEX.match(url)
-            if not match:
-                raise ValueError("无效的GitHub仓库URL")
-            author, repo = match.group(1), match.group(2).replace(".git", "")
-
-            base_download_url = ""
-            release_api_url = (
-                f"https://api.github.com/repos/{author}/{repo}/releases/latest"
-            )
-            try:
-                logger.info(f"正在检查最新发行版: {release_api_url}")
-                async with httpx.AsyncClient() as client:
-                    api_res = await client.get(
-                        release_api_url, follow_redirects=True, timeout=15.0
-                    )
-                if api_res.status_code == 200:
-                    release_data = api_res.json()
-                    if "zipball_url" in release_data:
-                        base_download_url = release_data["zipball_url"]
-                        logger.info(
-                            f"成功找到最新发行版: {release_data.get('tag_name', 'N/A')}"
-                        )
-                else:
-                    logger.warning(
-                        f"检查最新发行版失败 (状态码: {api_res.status_code})。将尝试下载默认分支。"
-                    )
-            except Exception as e:
-                logger.warning(f"检查最新发行版时发生错误: {e}。将尝试下载默认分支。")
-
-            if not base_download_url:
-                base_download_url = (
-                    f"https://github.com/{author}/{repo}/archive/HEAD.zip"
-                )
-                logger.info(f"使用默认分支下载地址: {base_download_url}")
-
-            fastest_proxies = await self._get_fastest_proxies()
-            attempt_prefixes = fastest_proxies + [""]
-
-            zip_content = None
-            last_error = None
-            for prefix in attempt_prefixes:
-                source = "代理" if prefix else "直连"
-                download_url = (
-                    f"{prefix.rstrip('/')}/{base_download_url}"
-                    if prefix
-                    else base_download_url
-                )
-
-                try:
-                    logger.info(
-                        f"开始尝试使用 ({source}: {prefix or '无'}) 下载: {download_url}"
-                    )
-                    response = await self.httpx_async_client.get(
-                        download_url, follow_redirects=True, timeout=60.0
-                    )
-                    response.raise_for_status()
-                    zip_content = BytesIO(response.content)
-                    logger.info(f"成功使用 ({source}) 下载插件。")
-                    break
-                except Exception as e:
-                    last_error = e
-                    logger.warning(f"使用 ({source}: {prefix or '无'}) 下载失败: {e}")
-                    continue
-
-            if not zip_content:
-                raise RuntimeError(
-                    f"所有代理及直连地址均尝试失败。最后一次错误: {last_error}"
-                )
-
-            with ZipFile(zip_content) as z:
-                if not z.namelist():
-                    raise RuntimeError("下载的压缩包为空。")
-
-                root_dir_name = z.namelist()[0].split("/")[0]
-                logger.info(f"正在解压插件到临时目录: {temp_dir}")
-                z.extractall(temp_dir)
-
-                source_path = temp_dir / root_dir_name
-                if not source_path.is_dir():
-                    raise RuntimeError(f"解压后未能找到预期的目录: {source_path}")
-
-                logger.info(f"准备将 {source_path} 移动到 {target_path}")
-                if target_path.exists():
-                    shutil.rmtree(target_path)
-                shutil.move(str(source_path), str(target_path))
-                logger.info("成功将插件移动到目标位置。")
-        finally:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-    async def load_plugin(self, plugin_name: str):
-        try:
-            await self.plugin_manager.load(specified_dir_name=plugin_name)
-        except Exception as e:
-            logger.warning(f"直接加载插件 {plugin_name} 失败: {e}，尝试重载。")
-            try:
-                await self.plugin_manager.reload(specified_plugin_name=plugin_name)
-            except Exception as reload_err:
-                logger.error(f"重载插件 {plugin_name} 也失败: {reload_err}")
-                raise RuntimeError(f"加载插件失败: {e}, 重载也失败: {reload_err}")
-
-    async def _send_readme_as_image(self, plugin_key: str, event: AstrMessageEvent):
-        """发送插件的README文档"""
-        plugin_path = self.plugins_dir / plugin_key
-        readme_path = plugin_path / "README.md"
-
-        if not readme_path.is_file():
-            logger.warning(f"插件 {plugin_key} 中未找到 README.md 文件，跳过发送。")
-            return
-
-        try:
-            logger.info(f"渲染插件 {plugin_key} 的 README.md.")
-            readme_content = readme_path.read_text(encoding="utf-8")
-            html_body = markdown.markdown(
-                readme_content, extensions=["fenced_code", "tables"]
-            )
-            template = self.template_env.get_template("readme_template.html")
-            full_html = template.render(readme_body=html_body)
-
-            img_url = await self.render_with_fallback(full_html, {})
-            yield event.image_result(img_url)
-
-        except Exception as e:
-            logger.error(f"渲染插件 {plugin_key} 的README失败: {e}")
-            yield event.plain_result("(无法渲染插件的README文档)")
+    def _get_market_info_case_insensitive(
+        self, plugin_dir_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """查找插件信息"""
+        lower_dir_name = plugin_dir_name.lower()
+        for key, info in self.plugins_data.items():
+            if key.lower() == lower_dir_name:
+                return info
+        return None
 
     @filter.command("插件排行")
     async def show_plugin_ranking(self, event: AstrMessageEvent):
+        """按Star数或更新时间查看插件排行"""
         await self.fetch_plugin_data()
         args = event.message_str.strip().split()
         sort_type = "star"
@@ -612,13 +536,10 @@ class PluginMarket(Star):
                 sort_type = "time"
             elif arg in ["star", "stars", "星级"]:
                 sort_type = "star"
-
         page = int(args[2]) if len(args) > 2 and args[2].isdigit() else 1
-
         if not self.plugins_data:
-            yield event.plain_result("暂无插件数据可供排行。")
+            yield event.plain_result("暂无插件数据可供排行")
             return
-
         sorted_plugins = self._sort_plugins_by_type(sort_type)
         total_plugins = len(sorted_plugins)
         total_pages = (total_plugins + self.page_size - 1) // self.page_size
@@ -626,7 +547,6 @@ class PluginMarket(Star):
         start_idx = (page - 1) * self.page_size
         end_idx = start_idx + self.page_size
         current_plugins = sorted_plugins[start_idx:end_idx]
-
         plugin_items = [
             {
                 "index": list(self.plugins_data.keys()).index(plugin_key) + 1,
@@ -638,10 +558,8 @@ class PluginMarket(Star):
             }
             for plugin_key, plugin_info in current_plugins
         ]
-
         sort_text = "更新时间" if sort_type == "time" else "Star数量"
         title = f"插件排行榜 (按{sort_text}排序, 第{page}/{total_pages}页)"
-
         try:
             img_url = await self.render_plugin_list_image(
                 plugins=plugin_items,
@@ -655,7 +573,7 @@ class PluginMarket(Star):
         except Exception as e:
             logger.error(f"插件排行图片生成失败: {str(e)}")
             yield event.plain_result(
-                f"图片生成失败，当前按{sort_text}排序，第{page}/{total_pages}页。"
+                f"图片生成失败，当前按{sort_text}排序，第{page}/{total_pages}页"
             )
 
     def _sort_plugins_by_type(self, sort_type: str) -> List[tuple]:
